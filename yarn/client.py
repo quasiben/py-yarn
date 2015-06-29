@@ -182,13 +182,14 @@ def local_resource(url, type_, visibility, timestamp, size, pattern=None):
         )
     if pattern and type_.upper() == 'PATTERN':
         resource.pattern = pattern
-    return resoruce
+    return resource
+
 
 def container_launch_context(command, resources, tokens='', environment={}, service_data={}, application_acls=[]):
     c = yarn_protos.ContainerLaunchContextProto(
         command=command,
         localResources=[yarn_protos.StringLocalResourceMapProto(key=k, value=local_resource(**v)) for k, v in resources.iteritems()],
-        toekns=tokens,
+        tokens=tokens,
         environment=[yarn_protos.StringStringMapProto(key=k, value=v) for k, v in environment.iteritems()],
         service_data=[yarn_protos.StringBytesMapProto(key=k, value=v) for k, v in service_data.iteritems()],
         application_ACLs=[yarn_protos.ApplicationACLMapProto(acl=acl, accessType=yarn_protos.ApplicationAccessTypeProto.Value(access_type)) for access_type, acl in application_acls]
