@@ -1,4 +1,8 @@
 from yarn import pb_to_dict, dict_to_pb, yarn_protos, client, amrm
+import logging
+import os
+logging.basicConfig(level=logging.DEBUG)
+
 host = "54.158.136.145"
 client_port = 9022
 master_port = 9024

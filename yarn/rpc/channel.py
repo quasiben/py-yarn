@@ -47,12 +47,14 @@ import socket
 import os
 import pwd
 import math
+import io
 
 # Third party imports
 from google.protobuf.service import RpcChannel
+from puresasl.client import SASLClient
 
 # Protobuf imports
-from snakebite.protobuf.RpcHeader_pb2 import RpcRequestHeaderProto, RpcResponseHeaderProto
+from snakebite.protobuf.RpcHeader_pb2 import RpcRequestHeaderProto, RpcResponseHeaderProto, RpcSaslProto
 from snakebite.protobuf.IpcConnectionContext_pb2 import IpcConnectionContextProto
 from snakebite.protobuf.ProtobufRpcEngine_pb2 import RequestHeaderProto
 from snakebite.protobuf.datatransfer_pb2 import OpReadBlockProto, BlockOpResponseProto, PacketHeaderProto, ClientReadStatusProto
@@ -60,6 +62,7 @@ from snakebite.protobuf.datatransfer_pb2 import OpReadBlockProto, BlockOpRespons
 from snakebite.formatter import format_bytes
 from snakebite.errors import RequestError
 from snakebite.crc32c import crc
+#from snakebite.rpc_sasl import SaslRpcClient
 
 import google.protobuf.internal.encoder as encoder
 import google.protobuf.internal.decoder as decoder
@@ -160,6 +163,7 @@ class SocketRpcChannel(RpcChannel):
     RPC_HEADER = "hrpc"
     RPC_SERVICE_CLASS = 0x00
     AUTH_PROTOCOL_NONE = 0x00
+    AUTH_PROTOCOL_SASL = 0xdf # -33
     RPC_PROTOCOL_BUFFFER = 0x02
 
 
@@ -176,6 +180,7 @@ class SocketRpcChannel(RpcChannel):
         self.client_id = str(uuid.uuid4())
         self.context_protocol = context_protocol
         self.timeout = timeout
+        self.token = None
 
     def validate_request(self, request):
         '''Validate the client request against the protocol file.'''
@@ -184,6 +189,7 @@ class SocketRpcChannel(RpcChannel):
         if not request.IsInitialized():
             raise Exception("Client request (%s) is missing mandatory fields" % type(request))
 
+    #TODO: Change default value of token to None
     def get_connection(self, host, port):
         '''Open a socket connection to a given host and port and writes the Hadoop header
         The Hadoop RPC protocol looks like this when creating a connection:
@@ -206,7 +212,11 @@ class SocketRpcChannel(RpcChannel):
         +---------------------------------------------------------------------+
         '''
 
+        
         log.debug("############## CONNECTING ##############")
+
+        auth = self.AUTH_PROTOCOL_NONE if self.token is None else self.AUTH_PROTOCOL_SASL
+
         # Open socket
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -214,11 +224,13 @@ class SocketRpcChannel(RpcChannel):
         # Connect socket to server - defined by host and port arguments
         self.sock.connect((host, port))
 
+        
+
         # Send RPC headers
         self.write(self.RPC_HEADER)                             # header
         self.write(struct.pack('B', self.version))              # version
         self.write(struct.pack('B', self.RPC_SERVICE_CLASS))    # RPC service class
-        self.write(struct.pack('B', self.AUTH_PROTOCOL_NONE))   # serialization type (protobuf = 0)
+        self.write(struct.pack('B', auth))   # serialization type (default none)
 
         rpc_header = self.create_rpc_request_header()
         context = self.create_connection_context()
@@ -228,10 +240,22 @@ class SocketRpcChannel(RpcChannel):
         if log.getEffectiveLevel() == logging.DEBUG:
             log.debug("Header length: %s (%s)" % (header_length, format_bytes(struct.pack('!I', header_length))))
 
-        self.write(struct.pack('!I', header_length))
+        
+        if auth == SocketRpcChannel.AUTH_PROTOCOL_SASL:
+            self.negotiate_sasl(self.token)
+            
+            
+        else:
+            self.write(struct.pack('!I', header_length))
 
-        self.write_delimited(rpc_header)
-        self.write_delimited(context)
+            self.write_delimited(rpc_header)
+
+            self.write_delimited(context)
+
+
+        
+
+        
     
     def write(self, data):
         if log.getEffectiveLevel() == logging.DEBUG:
@@ -241,6 +265,7 @@ class SocketRpcChannel(RpcChannel):
     def write_delimited(self, data):
         self.write(encoder._VarintBytes(len(data)))
         self.write(data)
+
 
     def create_rpc_request_header(self):
         '''Creates and serializes a delimited RpcRequestHeaderProto message.'''
@@ -271,6 +296,95 @@ class SocketRpcChannel(RpcChannel):
         s_context = context.SerializeToString()
         log_protobuf_message("RequestContext (len: %d)" % len(s_context), context)
         return s_context
+
+    def create_sasl_header(self):
+        rpcheader = RpcRequestHeaderProto()
+        rpcheader.rpcKind = 2  # rpcheaderproto.RpcKindProto.Value('RPC_PROTOCOL_BUFFER')
+        rpcheader.rpcOp = 0  # rpcheaderproto.RpcPayloadOperationProto.Value('RPC_FINAL_PACKET')
+        rpcheader.callId = -33
+        rpcheader.retryCount = -1
+        rpcheader.clientId = self.client_id[0:16]
+
+        return rpcheader
+
+    def negotiate_sasl(self, token):
+        log.debug("##############NEGOTIATING SASL#####################")
+        
+        #Prepares negotiate request
+
+        header_bytes = self.create_sasl_header().SerializeToString()
+
+        negotiate_request = RpcSaslProto()
+        negotiate_request.state = RpcSaslProto.NEGOTIATE
+        negotiate_request.version = 0
+
+        sasl_bytes = negotiate_request.SerializeToString()
+
+        total_length = len(header_bytes) + len(sasl_bytes) + encoder._VarintSize(len(header_bytes)) + encoder._VarintSize(len(sasl_bytes))
+
+        #Sends negotiate request
+        self.write(struct.pack("!I", total_length))
+        self.write_delimited(header_bytes)
+        self.write_delimited(sasl_bytes)
+
+        #Gets negotiate response
+        bytes = self.recv_rpc_message()
+        resp = self.parse_response(bytes, RpcSaslProto)
+
+        chosen_auth = None
+        for auth in resp.auths:
+            if auth.method == "TOKEN" and auth.mechanism == "DIGEST-MD5":
+                chosen_auth = auth
+
+
+        if chosen_auth is None:
+            raise IOError("Token digest-MD5 authentication not supported by server")
+
+        #Prepares initiate request
+
+        sasl = SASLClient(chosen_auth.serverId, 
+            chosen_auth.protocol, 
+            mechanism=chosen_auth.mechanism, 
+            username=token["identifier"], 
+            password=token["password"])
+
+        challenge_resp = sasl.process(chosen_auth.challenge)
+
+        auth = RpcSaslProto.SaslAuth()
+        auth.method = chosen_auth.method
+        auth.mechanism = chosen_auth.mechanism
+        auth.protocol = chosen_auth.protocol
+        auth.serverId = chosen_auth.serverId
+
+        initiate_request = RpcSaslProto()
+        initiate_request.state = RpcSaslProto.INITIATE
+        initiate_request.version = 0
+        initiate_request.auths.extend([auth])
+        initiate_request.token = challenge_resp
+
+        sasl_bytes = initiate_request.SerializeToString()
+
+        total_length = len(header_bytes) + len(sasl_bytes) + encoder._VarintSize(len(header_bytes)) + encoder._VarintSize(len(sasl_bytes))
+
+        #Sends initiate request
+        self.write(struct.pack("!I", total_length))
+        self.write_delimited(header_bytes)
+        self.write_delimited(sasl_bytes)
+
+        #Peer closes connection here :(
+        import ipdb
+        ipdb.set_trace()
+
+        bytes = self.recv_rpc_message()
+        resp = self.parse_response(bytes, RpcSaslProto)
+
+        
+
+
+
+
+
+
 
     def send_rpc_message(self, method, request):
         '''Sends a Hadoop RPC request to the NameNode.

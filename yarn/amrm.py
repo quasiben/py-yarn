@@ -16,6 +16,7 @@ from . import YARN_PROTOCOL_VERSION, dict_to_pb, pb_to_dict
 import urlparse
 
 import logging
+import pickle
 
 log = logging.getLogger(__name__)
 
@@ -85,15 +86,20 @@ class YarnAppMaster(object):
         tok = app['application_report']['am_rm_token']
         channel = self.service.channel
 
-        # current point of investigation
+        channel.token = tok
+
         import ipdb
         ipdb.set_trace()
 
-        # add_token(channel.ugi, token_alias(channel), tok) what's happening here?
+
+        # current point of investigation
+
+        #add_token(channel.ugi, token_alias(channel), tok) Store token in external datastructure for later use
     #
     #     # register the unmanaged appmaster
-    #     unmanagedappmaster.managed = false
+    #     unmanagedappmaster.managed = false (AM is not on cluster)
     #     register(unmanagedappmaster)
+        self.register(app)
     #     wait_for_attempt_state(app, Int32(1), YarnApplicationAttemptStateProto.APP_ATTEMPT_RUNNING) || throw(YarnException("Application attempt could not be launched"))
     #
     #     # initialize complete node list for appmaster
@@ -112,7 +118,7 @@ class YarnAppMaster(object):
         return c
 
     def register(self, app):
-        app = pb_to_dict(client.get_application_report(appid['cluster_timestamp'], appid['id']))
+        #app = pb_to_dict(client.get_application_report(appid['cluster_timestamp'], appid['id']))
         app_report = app['application_report']
         data = dict(host=self.host, rpc_port=self.port, tracking_url=app_report['trackingUrl'])
         req = dict_to_pb(yarn_service_protos.RegisterApplicationMasterRequestProto, data)
