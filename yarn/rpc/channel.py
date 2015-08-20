@@ -48,6 +48,7 @@ import os
 import pwd
 import math
 import io
+import base64
 
 # Third party imports
 from google.protobuf.service import RpcChannel
@@ -62,7 +63,9 @@ from snakebite.protobuf.datatransfer_pb2 import OpReadBlockProto, BlockOpRespons
 from snakebite.formatter import format_bytes
 from snakebite.errors import RequestError
 from snakebite.crc32c import crc
-#from snakebite.rpc_sasl import SaslRpcClient
+from snakebite.rpc_sasl import SaslRpcClient
+
+import sasl
 
 import google.protobuf.internal.encoder as encoder
 import google.protobuf.internal.decoder as decoder
@@ -189,7 +192,6 @@ class SocketRpcChannel(RpcChannel):
         if not request.IsInitialized():
             raise Exception("Client request (%s) is missing mandatory fields" % type(request))
 
-    #TODO: Change default value of token to None
     def get_connection(self, host, port):
         '''Open a socket connection to a given host and port and writes the Hadoop header
         The Hadoop RPC protocol looks like this when creating a connection:
@@ -212,8 +214,9 @@ class SocketRpcChannel(RpcChannel):
         +---------------------------------------------------------------------+
         '''
 
-        
+
         log.debug("############## CONNECTING ##############")
+
 
         auth = self.AUTH_PROTOCOL_NONE if self.token is None else self.AUTH_PROTOCOL_SASL
 
@@ -232,25 +235,22 @@ class SocketRpcChannel(RpcChannel):
         self.write(struct.pack('B', self.RPC_SERVICE_CLASS))    # RPC service class
         self.write(struct.pack('B', auth))   # serialization type (default none)
 
+        if auth == SocketRpcChannel.AUTH_PROTOCOL_SASL:
+            self.negotiate_sasl(self.token)
+            self.call_id = -3
+
+
         rpc_header = self.create_rpc_request_header()
-        context = self.create_connection_context()
+        context = self.create_connection_context() if auth is self.AUTH_PROTOCOL_NONE else self.create_connection_context_auth()
 
         header_length = len(rpc_header) + encoder._VarintSize(len(rpc_header)) +len(context) + encoder._VarintSize(len(context))
 
         if log.getEffectiveLevel() == logging.DEBUG:
             log.debug("Header length: %s (%s)" % (header_length, format_bytes(struct.pack('!I', header_length))))
 
-        
-        if auth == SocketRpcChannel.AUTH_PROTOCOL_SASL:
-            self.negotiate_sasl(self.token)
-            
-            
-        else:
-            self.write(struct.pack('!I', header_length))
-
-            self.write_delimited(rpc_header)
-
-            self.write_delimited(context)
+        self.write(struct.pack('!I', header_length))
+        self.write_delimited(rpc_header)
+        self.write_delimited(context)
 
 
         
@@ -292,6 +292,20 @@ class SocketRpcChannel(RpcChannel):
         local_user = pwd.getpwuid(os.getuid())[0]
         context.userInfo.effectiveUser = local_user
         context.protocol = self.context_protocol
+
+        s_context = context.SerializeToString()
+        log_protobuf_message("RequestContext (len: %d)" % len(s_context), context)
+        return s_context
+
+    def create_connection_context_auth(self):
+        '''Creates and seriazlies a IpcConnectionContextProto (not delimited)'''
+        context = IpcConnectionContextProto()
+        #not sure where to properly get user
+        context.userInfo.effectiveUser = "application_1438359019771_0113_000001"
+        context.protocol = self.context_protocol
+
+        import ipdb
+        ipdb.set_trace()
 
         s_context = context.SerializeToString()
         log_protobuf_message("RequestContext (len: %d)" % len(s_context), context)
@@ -342,14 +356,14 @@ class SocketRpcChannel(RpcChannel):
 
         #Prepares initiate request
 
-        sasl = SASLClient(chosen_auth.serverId, 
+        self.sasl = SASLClient(chosen_auth.serverId, 
             chosen_auth.protocol, 
             mechanism=chosen_auth.mechanism, 
-            username=token["identifier"], 
-            password=token["password"])
+            username=base64.b64encode(token["identifier"]), 
+            password=base64.b64encode(token["password"]))
 
         challenge_resp = sasl.process(chosen_auth.challenge)
-
+    
         auth = RpcSaslProto.SaslAuth()
         auth.method = chosen_auth.method
         auth.mechanism = chosen_auth.mechanism
@@ -369,19 +383,10 @@ class SocketRpcChannel(RpcChannel):
         #Sends initiate request
         self.write(struct.pack("!I", total_length))
         self.write_delimited(header_bytes)
-        self.write_delimited(sasl_bytes)
-
-        #Peer closes connection here :(
-        import ipdb
-        ipdb.set_trace()
+        self.write_delimited(sasl_bytes)    
 
         bytes = self.recv_rpc_message()
         resp = self.parse_response(bytes, RpcSaslProto)
-
-        
-
-
-
 
 
 

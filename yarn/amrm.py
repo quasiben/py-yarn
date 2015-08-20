@@ -86,10 +86,10 @@ class YarnAppMaster(object):
         tok = app['application_report']['am_rm_token']
         channel = self.service.channel
 
+
+        #TODO: better data structure like ugi
         channel.token = tok
 
-        import ipdb
-        ipdb.set_trace()
 
 
         # current point of investigation
