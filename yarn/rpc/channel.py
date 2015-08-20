@@ -362,7 +362,7 @@ class SocketRpcChannel(RpcChannel):
             username=base64.b64encode(token["identifier"]), 
             password=base64.b64encode(token["password"]))
 
-        challenge_resp = sasl.process(chosen_auth.challenge)
+        challenge_resp = self.sasl.process(chosen_auth.challenge)
     
         auth = RpcSaslProto.SaslAuth()
         auth.method = chosen_auth.method
