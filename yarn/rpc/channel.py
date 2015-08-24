@@ -45,10 +45,9 @@ June 2014
 # Standard library imports
 import socket
 import os
-import pwd
 import math
 import io
-import base64
+from base64 import b64encode
 
 # Third party imports
 from google.protobuf.service import RpcChannel
@@ -63,9 +62,6 @@ from snakebite.protobuf.datatransfer_pb2 import OpReadBlockProto, BlockOpRespons
 from snakebite.formatter import format_bytes
 from snakebite.errors import RequestError
 from snakebite.crc32c import crc
-from snakebite.rpc_sasl import SaslRpcClient
-
-import sasl
 
 import google.protobuf.internal.encoder as encoder
 import google.protobuf.internal.decoder as decoder
@@ -76,6 +72,8 @@ from snakebite import logger
 import logging
 import struct
 import uuid
+
+from yarn.ugi import UserGroupInformation
 
 # Configure package logging
 log = logger.getLogger(__name__)
@@ -173,7 +171,7 @@ class SocketRpcChannel(RpcChannel):
     '''Socket implementation of an RpcChannel.
     '''
 
-    def __init__(self, host, port, version, context_protocol, timeout=30):
+    def __init__(self, host, port, version, context_protocol, timeout=30, ugi=None):
         '''SocketRpcChannel to connect to a socket server on a user defined port.'''
         self.host = host
         self.port = port
@@ -184,6 +182,9 @@ class SocketRpcChannel(RpcChannel):
         self.context_protocol = context_protocol
         self.timeout = timeout
         self.token = None
+        if not ugi:
+            ugi = UserGroupInformation()
+        self.ugi = ugi
 
     def validate_request(self, request):
         '''Validate the client request against the protocol file.'''
@@ -217,8 +218,9 @@ class SocketRpcChannel(RpcChannel):
 
         log.debug("############## CONNECTING ##############")
 
-
-        auth = self.AUTH_PROTOCOL_NONE if self.token is None else self.AUTH_PROTOCOL_SASL
+        auth = self.AUTH_PROTOCOL_NONE
+        if len(self.ugi.tokens.keys()) > 0:
+            auth = self.AUTH_PROTOCOL_SASL
 
         # Open socket
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -236,12 +238,12 @@ class SocketRpcChannel(RpcChannel):
         self.write(struct.pack('B', auth))   # serialization type (default none)
 
         if auth == SocketRpcChannel.AUTH_PROTOCOL_SASL:
-            self.negotiate_sasl(self.token)
+            self.negotiate_sasl()
             self.call_id = -3
 
 
         rpc_header = self.create_rpc_request_header()
-        context = self.create_connection_context() if auth is self.AUTH_PROTOCOL_NONE else self.create_connection_context_auth()
+        context = self.create_connection_context() #if auth is self.AUTH_PROTOCOL_NONE else self.create_connection_context_auth()
 
         header_length = len(rpc_header) + encoder._VarintSize(len(rpc_header)) +len(context) + encoder._VarintSize(len(context))
 
@@ -289,8 +291,7 @@ class SocketRpcChannel(RpcChannel):
     def create_connection_context(self):
         '''Creates and seriazlies a IpcConnectionContextProto (not delimited)'''
         context = IpcConnectionContextProto()
-        local_user = pwd.getpwuid(os.getuid())[0]
-        context.userInfo.effectiveUser = local_user
+        context.userInfo.effectiveUser = self.ugi.get_effective_user()
         context.protocol = self.context_protocol
 
         s_context = context.SerializeToString()
@@ -321,8 +322,11 @@ class SocketRpcChannel(RpcChannel):
 
         return rpcheader
 
-    def negotiate_sasl(self, token):
+    def negotiate_sasl(self):
         log.debug("##############NEGOTIATING SASL#####################")
+
+        #TODO generalize
+        token = self.ugi.get_token('am_rm_token')
         
         #Prepares negotiate request
 
@@ -359,8 +363,8 @@ class SocketRpcChannel(RpcChannel):
         self.sasl = SASLClient(chosen_auth.serverId, 
             chosen_auth.protocol, 
             mechanism=chosen_auth.mechanism, 
-            username=base64.b64encode(token["identifier"]), 
-            password=base64.b64encode(token["password"]))
+            username=b64encode(token["identifier"]), 
+            password=b64encode(token["password"]))
 
         challenge_resp = self.sasl.process(chosen_auth.challenge)
     

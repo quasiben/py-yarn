@@ -2,6 +2,7 @@ import yarn.protobuf.applicationmaster_protocol_pb2 as application_master_protoc
 import yarn.protobuf.yarn_service_protos_pb2 as yarn_service_protos
 import yarn.protobuf.yarn_protos_pb2 as yarn_protos
 from  yarn.protobuf import Security_pb2 as yarn_security
+from yarn.ugi import create_ugi_from_app
 import snakebite.glob as glob
 from snakebite.errors import RequestError
 from yarn.rpc.service import RpcService
@@ -80,18 +81,18 @@ class YarnAppMaster(object):
         client.submit_application(**appData)
         app = pb_to_dict(client.get_application_report(appid['cluster_timestamp'], appid['id']))
 
-        import ipdb
-        ipdb.set_trace()
+        #import ipdb
+        #ipdb.set_trace()
 
         # keep the am_rm token
-        tok = app['application_report']['am_rm_token']
-        channel = self.service.channel
+        #tok = app['application_report']['am_rm_token']
+        #channel = self.service.channel
 
 
         #TODO: better data structure like ugi
-        channel.token = tok
+        #channel.token = tok
 
-        channel.appid = appid
+        #channel.appid = appid
 
 
 
@@ -122,6 +123,7 @@ class YarnAppMaster(object):
 
     def register(self, app):
         #app = pb_to_dict(client.get_application_report(appid['cluster_timestamp'], appid['id']))
+        self.service.channel.ugi = create_ugi_from_app(app)
         app_report = app['application_report']
         data = dict(host=self.host, rpc_port=self.port, tracking_url=app_report['trackingUrl'])
         req = dict_to_pb(yarn_service_protos.RegisterApplicationMasterRequestProto, data)
@@ -131,7 +133,7 @@ class YarnAppMaster(object):
         resource.priority.priority = 1
         resource.num_containers = 1
         resource.resource_name = "*" #Any node will do
-        resource.capability.memory = 1
+        resource.capability.memory = 2045
         resource.capability.virtual_cores = 1 
 
 
