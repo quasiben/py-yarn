@@ -218,7 +218,9 @@ class SocketRpcChannel(RpcChannel):
 
         log.debug("############## CONNECTING ##############")
 
+
         auth = self.AUTH_PROTOCOL_NONE
+        # Only attempt authentication if we have tokens to do so
         if len(self.ugi.tokens.keys()) > 0:
             auth = self.AUTH_PROTOCOL_SASL
 
@@ -228,8 +230,7 @@ class SocketRpcChannel(RpcChannel):
         self.sock.settimeout(self.timeout)
         # Connect socket to server - defined by host and port arguments
         self.sock.connect((host, port))
-
-        
+   
 
         # Send RPC headers
         self.write(self.RPC_HEADER)                             # header
@@ -243,21 +244,9 @@ class SocketRpcChannel(RpcChannel):
 
 
         rpc_header = self.create_rpc_request_header()
-        context = self.create_connection_context() #if auth is self.AUTH_PROTOCOL_NONE else self.create_connection_context_auth()
+        context = self.create_connection_context() 
 
-        header_length = len(rpc_header) + encoder._VarintSize(len(rpc_header)) +len(context) + encoder._VarintSize(len(context))
-
-        if log.getEffectiveLevel() == logging.DEBUG:
-            log.debug("Header length: %s (%s)" % (header_length, format_bytes(struct.pack('!I', header_length))))
-
-        self.write(struct.pack('!I', header_length))
-        self.write_delimited(rpc_header)
-        self.write_delimited(context)
-
-
-        
-
-        
+        self.send_with_total(rpc_header, context)
     
     def write(self, data):
         if log.getEffectiveLevel() == logging.DEBUG:
@@ -298,20 +287,6 @@ class SocketRpcChannel(RpcChannel):
         log_protobuf_message("RequestContext (len: %d)" % len(s_context), context)
         return s_context
 
-    def create_connection_context_auth(self):
-        '''Creates and seriazlies a IpcConnectionContextProto (not delimited)'''
-        context = IpcConnectionContextProto()
-        #TODO do this better
-        context.userInfo.effectiveUser = "appattempt_" + str(self.appid["cluster_timestamp"]) + "_" + str(self.appid["id"]).zfill(4) + "_000001"
-        context.protocol = self.context_protocol
-
-        import ipdb
-        ipdb.set_trace()
-
-        s_context = context.SerializeToString()
-        log_protobuf_message("RequestContext (len: %d)" % len(s_context), context)
-        return s_context
-
     def create_sasl_header(self):
         rpcheader = RpcRequestHeaderProto()
         rpcheader.rpcKind = 2  # rpcheaderproto.RpcKindProto.Value('RPC_PROTOCOL_BUFFER')
@@ -321,6 +296,14 @@ class SocketRpcChannel(RpcChannel):
         rpcheader.clientId = self.client_id[0:16]
 
         return rpcheader
+
+    def send_with_total(self, header_bytes, body_bytes):
+        total_length = len(header_bytes) + encoder._VarintSize(len(header_bytes))
+        total_length += len(body_bytes) + encoder._VarintSize(len(body_bytes))
+
+        self.write(struct.pack("!I", total_length))
+        self.write_delimited(header_bytes)
+        self.write_delimited(body_bytes)
 
     def negotiate_sasl(self):
         log.debug("##############NEGOTIATING SASL#####################")
@@ -338,17 +321,14 @@ class SocketRpcChannel(RpcChannel):
 
         sasl_bytes = negotiate_request.SerializeToString()
 
-        total_length = len(header_bytes) + len(sasl_bytes) + encoder._VarintSize(len(header_bytes)) + encoder._VarintSize(len(sasl_bytes))
-
-        #Sends negotiate request
-        self.write(struct.pack("!I", total_length))
-        self.write_delimited(header_bytes)
-        self.write_delimited(sasl_bytes)
+        self.send_with_total(header_bytes, sasl_bytes)
 
         #Gets negotiate response
         bytes = self.recv_rpc_message()
         resp = self.parse_response(bytes, RpcSaslProto)
 
+
+        #TODO allow for other authentication procedures
         chosen_auth = None
         for auth in resp.auths:
             if auth.method == "TOKEN" and auth.mechanism == "DIGEST-MD5":
@@ -380,22 +360,13 @@ class SocketRpcChannel(RpcChannel):
         initiate_request.auths.extend([auth])
         initiate_request.token = challenge_resp
 
-        sasl_bytes = initiate_request.SerializeToString()
+        sasl_bytes = initiate_request.SerializeToString()  
 
-        total_length = len(header_bytes) + len(sasl_bytes) + encoder._VarintSize(len(header_bytes)) + encoder._VarintSize(len(sasl_bytes))
-
-        #Sends initiate request
-        self.write(struct.pack("!I", total_length))
-        self.write_delimited(header_bytes)
-        self.write_delimited(sasl_bytes)    
+        self.send_with_total(header_bytes, sasl_bytes)
 
         bytes = self.recv_rpc_message()
         resp = self.parse_response(bytes, RpcSaslProto)
         #If desired, server can be authenticated using the rspauth in the response
-
-
-
-
 
     def send_rpc_message(self, method, request):
         '''Sends a Hadoop RPC request to the NameNode.

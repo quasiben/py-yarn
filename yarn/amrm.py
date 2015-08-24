@@ -80,25 +80,6 @@ class YarnAppMaster(object):
         }
         client.submit_application(**appData)
         app = pb_to_dict(client.get_application_report(appid['cluster_timestamp'], appid['id']))
-
-        #import ipdb
-        #ipdb.set_trace()
-
-        # keep the am_rm token
-        #tok = app['application_report']['am_rm_token']
-        #channel = self.service.channel
-
-
-        #TODO: better data structure like ugi
-        #channel.token = tok
-
-        #channel.appid = appid
-
-
-
-        # current point of investigation
-
-        #add_token(channel.ugi, token_alias(channel), tok) Store token in external datastructure for later use
     #
     #     # register the unmanaged appmaster
     #     unmanagedappmaster.managed = false (AM is not on cluster)
