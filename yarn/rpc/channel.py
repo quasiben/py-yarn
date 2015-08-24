@@ -300,8 +300,8 @@ class SocketRpcChannel(RpcChannel):
     def create_connection_context_auth(self):
         '''Creates and seriazlies a IpcConnectionContextProto (not delimited)'''
         context = IpcConnectionContextProto()
-        #not sure where to properly get user
-        context.userInfo.effectiveUser = "application_1438359019771_0113_000001"
+        #TODO do this better
+        context.userInfo.effectiveUser = "appattempt_" + str(self.appid["cluster_timestamp"]) + "_" + str(self.appid["id"]).zfill(4) + "_000001"
         context.protocol = self.context_protocol
 
         import ipdb
@@ -362,7 +362,7 @@ class SocketRpcChannel(RpcChannel):
             username=base64.b64encode(token["identifier"]), 
             password=base64.b64encode(token["password"]))
 
-        challenge_resp = sasl.process(chosen_auth.challenge)
+        challenge_resp = self.sasl.process(chosen_auth.challenge)
     
         auth = RpcSaslProto.SaslAuth()
         auth.method = chosen_auth.method
@@ -387,6 +387,8 @@ class SocketRpcChannel(RpcChannel):
 
         bytes = self.recv_rpc_message()
         resp = self.parse_response(bytes, RpcSaslProto)
+        #If desired, server can be authenticated using the rspauth in the response
+
 
 
 

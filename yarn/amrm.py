@@ -80,7 +80,8 @@ class YarnAppMaster(object):
         client.submit_application(**appData)
         app = pb_to_dict(client.get_application_report(appid['cluster_timestamp'], appid['id']))
 
-
+        import ipdb
+        ipdb.set_trace()
 
         # keep the am_rm token
         tok = app['application_report']['am_rm_token']
@@ -89,6 +90,8 @@ class YarnAppMaster(object):
 
         #TODO: better data structure like ugi
         channel.token = tok
+
+        channel.appid = appid
 
 
 
@@ -124,9 +127,18 @@ class YarnAppMaster(object):
         req = dict_to_pb(yarn_service_protos.RegisterApplicationMasterRequestProto, data)
         self.service.registerApplicationMaster(req)
 
-        data = dict(ask=1, release=0,response_id=1)
-        req = dict_to_pb(yarn_service_protos.AllocateRequestProto, data)
-        self.service.allocate(req)
+        resource = yarn_protos.ResourceRequestProto()
+        resource.priority.priority = 1
+        resource.num_containers = 1
+        resource.resource_name = "*" #Any node will do
+        resource.capability.memory = 1
+        resource.capability.virtual_cores = 1 
+
+
+        request = yarn_service_protos.AllocateRequestProto()
+        request.ask.extend([resource]) 
+        #req = dict_to_pb(yarn_service_protos.AllocateRequestProto, data)
+        self.service.allocate(request)
         #logmsg("started processing am-rm messages")
     #     !isempty(alloc_pending) && set_field!(inp, :ask, alloc_pending)
     #     !isempty(release_pending) && set_field!(inp, :release, release_pending)
