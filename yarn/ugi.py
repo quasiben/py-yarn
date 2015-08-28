@@ -4,6 +4,8 @@ import os
 from snakebite.protobuf.IpcConnectionContext_pb2 import UserInformationProto
 from snakebite.protobuf.Security_pb2 import TokenProto
 
+#TODO rewrite to work directly with protos
+
 class UserGroupInformation:
 	def __init__(self, effective_user=None, real_user=None):
 		self.tokens = {}
@@ -33,9 +35,7 @@ def create_ugi_from_app(app):
 	#TODO use proto instead of dict?
 	appid = app["application_report"]["currentApplicationAttemptId"]
 
-	effective_user = "appattempt_" + str(appid["application_id"]["cluster_timestamp"]) + \
-		"_" + str(appid["application_id"]["id"]).zfill(4) + \
-		"_" + str(appid["attemptId"]).zfill(6)
+	effective_user = create_effective_user_from_app_id(appid)
 	
 	ugi = UserGroupInformation(effective_user)
 
@@ -44,5 +44,10 @@ def create_ugi_from_app(app):
 
 	return ugi
 
+def create_effective_user_from_app_id(appid):
+	effective_user = "appattempt_" + str(appid["application_id"]["cluster_timestamp"]) + \
+		"_" + str(appid["application_id"]["id"]).zfill(4) + \
+		"_" + str(appid["attemptId"]).zfill(6)
+	return effective_user
 
 
