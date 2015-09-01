@@ -73,7 +73,7 @@ import logging
 import struct
 import uuid
 
-from yarn.ugi import UserGroupInformation
+from yarn.ugi import UserGroupInformation, get_alias
 
 # Configure package logging
 log = logger.getLogger(__name__)
@@ -280,7 +280,7 @@ class SocketRpcChannel(RpcChannel):
     def create_connection_context(self):
         '''Creates and seriazlies a IpcConnectionContextProto (not delimited)'''
         context = IpcConnectionContextProto()
-        context.userInfo.effectiveUser = self.ugi.get_effective_user()
+        context.userInfo.effectiveUser = self.ugi.effective_user
         context.protocol = self.context_protocol
 
         s_context = context.SerializeToString()
@@ -308,8 +308,8 @@ class SocketRpcChannel(RpcChannel):
     def negotiate_sasl(self):
         log.debug("##############NEGOTIATING SASL#####################")
 
-        #TODO generalize
-        token = self.ugi.get_token('am_rm_token')
+        #TODO: choose kind?
+        token = self.ugi.find_token(get_alias(self))
         
         #Prepares negotiate request
 
@@ -343,8 +343,8 @@ class SocketRpcChannel(RpcChannel):
         self.sasl = SASLClient(chosen_auth.serverId, 
             chosen_auth.protocol, 
             mechanism=chosen_auth.mechanism, 
-            username=b64encode(token["identifier"]), 
-            password=b64encode(token["password"]))
+            username=b64encode(token.identifier), 
+            password=b64encode(token.password))
 
         challenge_resp = self.sasl.process(chosen_auth.challenge)
     

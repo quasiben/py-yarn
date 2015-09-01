@@ -4,7 +4,8 @@ import yarn.protobuf.yarn_service_protos_pb2 as yarn_service_protos
 import yarn.protobuf.yarn_protos_pb2 as yarn_protos
 from yarn.client import container_launch_context
 from  yarn.protobuf import Security_pb2 as yarn_security
-from yarn.ugi import create_ugi_from_app, create_effective_user_from_app_id, UserGroupInformation
+from yarn.ugi import create_ugi_from_app_report, create_effective_user_from_app_id, get_alias
+from yarn.node import Node
 import snakebite.glob as glob
 from snakebite.errors import RequestError
 from yarn.rpc.service import RpcService
@@ -33,8 +34,7 @@ YARN_NM_CONN_KEEPALIVE_SECS = 5*60
 
 AM_RM_SERVICE = {"class" : "org.apache.hadoop.yarn.api.ApplicationMasterProtocolPB", 
     "stub" : application_master_protocol.ApplicationMasterProtocolService_Stub}
-AM_NM_SERVICE = {"class" : "org.apache.hadoop.yarn.api.ContainerManagementProtocolPB",
-    "stub" : node_manager_protocol.ContainerManagementProtocolService_Stub}
+
 
 class YarnAppMaster(object):
     """
@@ -61,11 +61,14 @@ class YarnAppMaster(object):
         self.scheduler_call_id = 1
         self.ask = []
         self.release = []
-        self.blacklist = []
+        self.blacklist = [] #TODO figure out proper blacklisting
         self.progress = None
         self.increase = None 
         self.nm_service = None
         self.alive = True #TODO: only set alive when registered?
+        self.pending_requests = []
+        self.nodes = [] #TODO dict?
+        self.ugi = None
 
         log.debug("Created Master for %s:%s", host, port)
 
@@ -85,7 +88,7 @@ class YarnAppMaster(object):
           'application_name': "YarnBZApp",
           'queue': 'default',
           'priority': 1,
-          'unmanaged_am': True, # what does this mean?
+          'unmanaged_am': True,
           'am_container_spec': clc,
           'resource': res,
           'maxAppAttempts': 2,
@@ -94,10 +97,7 @@ class YarnAppMaster(object):
         }
 
         client.submit_application(**appData)
-        app = pb_to_dict(client.get_application_report(appid['cluster_timestamp'], appid['id']))
-
-        import ipdb
-        ipdb.set_trace()
+        app = client.get_application_report(appid['cluster_timestamp'], appid['id'])
 
         self.register(app)
 
@@ -110,26 +110,31 @@ class YarnAppMaster(object):
         return c
 
     def register(self, app):
-        self.am_rm_service.channel.ugi = create_ugi_from_app(app)
-        app_report = app['application_report']
-        data = dict(host=self.host, rpc_port=self.port, tracking_url=app_report['trackingUrl'])
+        self.ugi = create_ugi_from_app_report(get_alias(self.am_rm_service), app)
+        self.am_rm_service.channel.ugi = self.ugi
+        app_report = app.application_report
+        data = dict(host=self.host, rpc_port=self.port, tracking_url=app_report.trackingUrl)
         req = dict_to_pb(yarn_service_protos.RegisterApplicationMasterRequestProto, data)
         self.am_rm_service.registerApplicationMaster(req)
 
-        #Dummy resource request
-        resource = yarn_protos.ResourceRequestProto()
-        resource.priority.priority = YARN_CONTAINER_PRIORITY_DEFAULT
-        resource.num_containers = YARN_CONTAINER_NUM_DEFAULT
-        resource.resource_name = YARN_CONTAINER_LOCATION_DEFAULT
-        resource.capability.memory = YARN_CONTAINER_MEM_DEFAULT
-        resource.capability.virtual_cores = YARN_CONTAINER_CPU_DEFAULT
+        #re-enable once multithreading is implemented
+        #self.begin_heartbeat()
+    
+    def create_request(
+        self,
+        callback,
+        num_containers=YARN_CONTAINER_NUM_DEFAULT,
+        priority=YARN_CONTAINER_PRIORITY_DEFAULT,
+        resource_name=YARN_CONTAINER_LOCATION_DEFAULT,
+        memory=YARN_CONTAINER_MEM_DEFAULT,
+        virtual_cores=YARN_CONTAINER_CPU_DEFAULT):
 
-        self.ask.append(resource)
+        request = Request(callback, num_containers, priority, resource_name, memory, virtual_cores)
+        self.ask.append(request.to_protobuf())
+        self.pending_requests.append(request)
 
-        self.begin_heartbeat()
 
-
-    def allocate(self, ask=[], release=[], blacklist=[], response_id=None, progress=None, increase=None):
+    def _allocate(self, ask=[], release=[], blacklist=[], response_id=None, progress=None, increase=None):
         resource_request = yarn_service_protos.AllocateRequestProto()
         resource_request.ask.extend(ask)
         resource_request.release.extend(release)
@@ -146,7 +151,7 @@ class YarnAppMaster(object):
         log.debug("Starting AM heartbeat")
         #TODO Start in separate thread
         while self.alive:
-            self.heartbeat()
+            self._heartbeat()
             time.sleep(interval)
 
         import ipdb
@@ -155,51 +160,79 @@ class YarnAppMaster(object):
         log.debug("AM no longer alive, stopping heartbeat")
 
 
-    def heartbeat(self):
+    def _heartbeat(self):
         log.debug("AM heartbeat with ID " + str(self.scheduler_call_id))
-        alloc_resp = self.allocate(self.ask, self.release, self.blacklist, self.scheduler_call_id, self.progress, self.increase)
+        alloc_resp = self._allocate(self.ask, self.release, self.blacklist, self.scheduler_call_id, self.progress, self.increase)
+        
         self.ask = []
         self.release = []
         self.blacklist = []
         self.scheduler_call_id += 1
         self.increase = None #TODO find out if appropriate
-        self.handle_response(alloc_resp) #TODO set up system of callbacks
 
-    #TODO generalized callbacks
-    def handle_response(self, alloc_resp):
-        if len(alloc_resp.allocated_containers) > 0:
-            node = alloc_resp.nm_tokens[0]
-            node_id = node.nodeId
+        if alloc_resp.nm_tokens is not None:
+            self.add_nodes(alloc_resp.nm_tokens)
+        #TODO updte ugi if nessecary
 
-            node_token = node.token
+        self._delegate_resources(alloc_resp) #TODO set up system of callbacks
 
-            container = alloc_resp.allocated_containers[0]
-            container_token = container.container_token
+    def add_nodes(self, nm_tokens):
+        for node in nm_tokens:
+            if self.get_node(node.nodeId) is None:
+                new_node = Node(node.nodeId, self, node_token=node.token)
+                self.nodes.append(new_node)
+                self.ugi.add_token(new_node.alias, new_node.node_token)
 
-            appid = container.id.app_attempt_id
-            effective_user = create_effective_user_from_app_id(pb_to_dict(appid))
+    #TODO better object than full alloc_resp
+    def _delegate_resources(self, alloc_resp):
+        #TODO order by priority. Or if possible, give via ID
+        new_pending = []
+        for request in self.pending_requests:
+            if self.meets_requirements(alloc_resp, request):
+                #TODO Remove container that was just started from available
+                request.callback(self, alloc_resp)
+            else:
+                new_pending.append(request)
 
-            node_ugi = UserGroupInformation(effective_user=effective_user)
-            #TODO change once SASL auth is generalized
-            node_ugi.add_token("am_rm_token", node.token.identifier, node.token.password)
-
-            #Connect to node manager
-            context_proto = "org.apache.hadoop.yarn.api.ContainerManagementProtocolPB"
-            host = node_id.host
-            port = node_id.port
-            service_stub_class = node_manager_protocol.ContainerManagementProtocolService_Stub
-            self.nm_service = RpcService(service_stub_class, context_proto, port, host, self.hadoop_version)
-
-            self.nm_service.channel.ugi = node_ugi
-
-            pb = container_launch_context(["yes"], {}, tokens=container_token.SerializeToString())
-            self.nm_service.startContainers(pb)
-
-            import ipdb
-            ipdb.set_trace()
-
-            log.info("Started container at node on " + str(node_id.host) + ":" + str(node_id.port))
-            self.alive = False
+        self.pending_requests = new_pending
 
 
+    def meets_requirements(self, alloc_resp, request):
+        #TODO full checking
+        return len(alloc_resp.allocated_containers) == request.num_containers
 
+    def get_node(self, node_id=None):
+        found = None
+        to_find = Node(node_id, self).alias
+        for node in self.nodes:
+            if node.alias == to_find:
+                found = node
+        return found
+
+
+
+class Request(object):
+    def __init__(
+        self,
+        callback,
+        num_containers=YARN_CONTAINER_NUM_DEFAULT,
+        priority=YARN_CONTAINER_PRIORITY_DEFAULT,
+        resource_name=YARN_CONTAINER_LOCATION_DEFAULT,
+        memory=YARN_CONTAINER_MEM_DEFAULT,
+        virtual_cores=YARN_CONTAINER_CPU_DEFAULT):
+
+        self.callback = callback
+        self.num_containers = num_containers
+        self.priority = priority
+        self.resource_name = resource_name
+        self.memory = memory
+        self.virtual_cores = virtual_cores
+
+    def to_protobuf(self):
+        resource = yarn_protos.ResourceRequestProto()
+        resource.priority.priority = self.priority
+        resource.num_containers = self.num_containers
+        resource.resource_name = self.resource_name
+        resource.capability.memory = self.memory
+        resource.capability.virtual_cores = self.virtual_cores
+        return resource

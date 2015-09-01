@@ -168,6 +168,8 @@ class Client(object):
     def cancel_delegation_token(self):
         pass
 
+
+#TODO move these functions somewhere more appropriate
 def local_resource(url, type_, visibility, timestamp, size, pattern=None):
     url = urlparse.urlparse(url)
     url = yarn_protos.URLProto(scheme=url.scheme, file=url.path,
