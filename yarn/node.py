@@ -27,11 +27,17 @@ class Node(object):
 
 	@property 
 	def host(self):
-		return self.node_id.host
+		host = self.node_id.host
+		if self.node_token:
+			host = self.node_token.service.split(":")[0]
+		return host
 
 	@property 
 	def port(self):
-		return self.node_id.port
+		port = self.node_id.port
+		if self.node_token:
+			port = int(self.node_token.service.split(":")[1])
+		return port
 
 	@property 
 	def alias(self):
