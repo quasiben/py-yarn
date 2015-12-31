@@ -172,9 +172,8 @@ class YarnAppMaster(object):
 
         if alloc_resp.nm_tokens is not None:
             self.add_nodes(alloc_resp.nm_tokens)
-        #TODO updte ugi if nessecary
 
-        self._delegate_resources(alloc_resp) #TODO set up system of callbacks
+        self._delegate_resources(alloc_resp)
 
     def add_nodes(self, nm_tokens):
         for node in nm_tokens:
@@ -201,9 +200,11 @@ class YarnAppMaster(object):
         #TODO full checking
         return len(alloc_resp.allocated_containers) == request.num_containers
 
-    def get_node(self, node_id=None):
+    def get_node(self, node_id=None, alias=None):
         found = None
-        to_find = Node(node_id, self).alias
+        to_find = alias
+        if alias is None:
+            to_find = Node(node_id, self).alias
         for node in self.nodes:
             if node.alias == to_find:
                 found = node
